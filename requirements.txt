@@ -1,0 +1,9 @@
+supabase>=2.0.0
+anthropic>=0.40.0
+discord.py>=2.3.0
+google-play-scraper>=1.2.7
+praw>=7.8.0
+gspread>=6.0.0
+google-auth>=2.0.0
+httpx>=0.27.0
+python-dateutil>=2.9.0
