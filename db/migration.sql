@@ -62,3 +62,14 @@ CREATE UNIQUE INDEX idx_feedback_classified_feedback_id ON feedback_classified (
 CREATE INDEX idx_feedback_classified_sentiment ON feedback_classified (sentiment);
 CREATE INDEX idx_feedback_classified_severity ON feedback_classified (severity);
 CREATE INDEX idx_feedback_classified_classified_at ON feedback_classified (classified_at DESC);
+
+-- RPC: fetch unclassified feedback in a single query
+CREATE OR REPLACE FUNCTION unclassified_feedback(batch_limit int DEFAULT 50)
+RETURNS TABLE(id uuid, content text, source text, rating smallint) AS $$
+  SELECT r.id, r.content, r.source, r.rating
+  FROM feedback_raw r
+  LEFT JOIN feedback_classified c ON c.feedback_id = r.id
+  WHERE c.feedback_id IS NULL
+    AND r.superseded_by IS NULL
+  LIMIT batch_limit;
+$$ LANGUAGE sql STABLE;

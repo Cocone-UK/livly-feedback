@@ -6,7 +6,7 @@ from dateutil import parser as dateutil_parser
 from scrapers.base import FeedbackItem, ScraperResult
 
 APP_ID = "1553045339"
-COUNTRY_REGION_MAP = {"us": "en", "jp": "jp"}
+COUNTRY_REGION_MAP = {"us": "en", "jp": "jp", "tw": "tw", "hk": "hk"}
 RSS_URL = "https://itunes.apple.com/{country}/rss/customerreviews/page={page}/id={app_id}/sortBy=mostRecent/json"
 
 
@@ -34,7 +34,7 @@ def scrape_appstore(
     max_pages: int = 10,
 ) -> list[ScraperResult]:
     if countries is None:
-        countries = ["us", "jp"]
+        countries = ["us", "jp", "tw", "hk"]
 
     max_pages = min(max_pages, 10)
     results = []

@@ -1,5 +1,6 @@
 """AI classification pipeline using Claude Haiku 4.5 with tool-use."""
 
+import json
 import os
 import logging
 from typing import Optional
@@ -44,7 +45,7 @@ CLASSIFICATION_TOOL = {
             },
             "language": {
                 "type": "string",
-                "enum": ["en", "ja", "other"],
+                "enum": ["en", "ja", "zh", "other"],
                 "description": "Detected language of the feedback.",
             },
             "summary_en": {
@@ -118,26 +119,16 @@ def classify_feedback(
 
 
 def _fetch_unclassified(supabase_client, batch_size: int) -> list[dict]:
-    """Fetch unclassified, non-superseded feedback items."""
-    classified_resp = (
-        supabase_client.table("feedback_classified")
-        .select("feedback_id")
-        .limit(10000)
-        .execute()
+    """Fetch unclassified, non-superseded feedback via Postgres RPC."""
+    from db.retry import with_retry
+
+    resp = with_retry(
+        lambda: supabase_client.rpc(
+            "unclassified_feedback", {"batch_limit": batch_size}
+        ).execute(),
+        "fetch unclassified feedback",
     )
-    classified_ids = [r["feedback_id"] for r in (classified_resp.data or [])]
-
-    query = (
-        supabase_client.table("feedback_raw")
-        .select("id, content, source, rating")
-        .is_("superseded_by", "null")
-        .limit(batch_size)
-    )
-
-    if classified_ids:
-        query = query.not_.in_("id", classified_ids)
-
-    return query.execute().data or []
+    return resp.data or []
 
 
 def classify_batch(
@@ -149,6 +140,8 @@ def classify_batch(
     Loops in batches of batch_size until no unclassified items remain.
     Returns dict with counts: classified, failed.
     """
+    from db.retry import with_retry
+
     classified_count = 0
     failed_count = 0
 
@@ -157,6 +150,7 @@ def classify_batch(
         if not batch:
             break
 
+        logger.info("Classifying batch of %d items", len(batch))
         for row in batch:
             result = classify_feedback(
                 feedback_id=row["id"],
@@ -169,17 +163,29 @@ def classify_batch(
                 failed_count += 1
                 continue
 
-            supabase_client.table("feedback_classified").insert({
+            def _to_pg_array(items: list[str]) -> str:
+                """Convert Python list to Postgres array literal."""
+                escaped = []
+                for item in items:
+                    s = item.replace("\\", "\\\\").replace('"', '\\"')
+                    escaped.append(f'"{s}"')
+                return "{" + ",".join(escaped) + "}"
+
+            insert_data = {
                 "feedback_id": result["feedback_id"],
                 "sentiment": result["sentiment"],
-                "categories": result["categories"],
+                "categories": _to_pg_array(result.get("categories", [])),
                 "severity": result["severity"],
                 "language": result["language"],
                 "summary": result["summary_en"],
                 "summary_jp": result["summary_jp"],
-                "key_quotes": result["key_quotes"],
+                "key_quotes": _to_pg_array(result.get("key_quotes", [])),
                 "model_used": result["model_used"],
-            }).execute()
+            }
+            with_retry(
+                lambda d=insert_data: supabase_client.table("feedback_classified").insert(d).execute(),
+                "insert classification",
+            )
 
             classified_count += 1
 

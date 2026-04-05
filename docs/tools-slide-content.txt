@@ -1,0 +1,10 @@
+Automated Feedback Collection
+
+Continuous monitoring of player sentiment across App Store, Google Play, Reddit, and Discord. EN and JP markets. Every review classified by sentiment, category, severity — summarized in both languages.
+
+- Weekly trend reports — which problems are growing or shrinking
+- Severity-ranked issues — critical complaints surface the same week
+- EN vs JP side by side — same framework, both markets
+- Progress tracking — after a fix ships, complaint counts go down visibly
+
+New sources can be added at any time. Output format is fully adjustable on the fly. Works for any Cocone service — new dashboard ready within an hour.
