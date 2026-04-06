@@ -198,8 +198,8 @@ def classify_batch(
                 "model_used": result["model_used"],
             }
             with_retry(
-                lambda d=insert_data: supabase_client.table("feedback_classified").insert(d).execute(),
-                "insert classification",
+                lambda d=insert_data: supabase_client.table("feedback_classified").upsert(d).execute(),
+                "upsert classification",
             )
 
             classified_count += 1
