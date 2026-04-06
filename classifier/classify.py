@@ -3,6 +3,7 @@
 import json
 import os
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 import anthropic
 
@@ -69,6 +70,18 @@ CLASSIFICATION_TOOL = {
     },
 }
 
+CONCURRENCY = 10  # parallel Anthropic API calls per batch
+
+
+def _to_pg_array(items: list[str]) -> str:
+    """Convert Python list to Postgres array literal."""
+    escaped = []
+    for item in items:
+        s = item.replace("\\", "\\\\").replace('"', '\\"')
+        escaped.append(f'"{s}"')
+    return "{" + ",".join(escaped) + "}"
+
+
 SYSTEM_PROMPT = """You are classifying user feedback for Livly Island, a mobile pet game by Cocone.
 Analyze the feedback and classify it using the classify_feedback tool.
 
@@ -79,6 +92,7 @@ Severity guidelines:
 
 
 def classify_feedback(
+    client: anthropic.Anthropic,
     feedback_id: str,
     content: str,
     source: str,
@@ -88,7 +102,6 @@ def classify_feedback(
 
     Returns classification dict or None if classification fails.
     """
-    client = anthropic.Anthropic(max_retries=3)
 
     rating_str = f"{rating}/5" if rating is not None else "N/A"
     user_message = f"Feedback from {source} (rating: {rating_str}):\n\n{content}"
@@ -133,15 +146,17 @@ def _fetch_unclassified(supabase_client, batch_size: int) -> list[dict]:
 
 def classify_batch(
     supabase_client,
-    batch_size: int = 50,
+    batch_size: int = 200,
 ) -> dict:
     """Classify all unclassified, non-superseded feedback items.
 
-    Loops in batches of batch_size until no unclassified items remain.
+    Uses parallel API calls (ThreadPoolExecutor) for throughput.
+    Loops in batches until no unclassified items remain.
     Returns dict with counts: classified, failed.
     """
     from db.retry import with_retry
 
+    ai_client = anthropic.Anthropic(max_retries=3)
     classified_count = 0
     failed_count = 0
 
@@ -151,25 +166,25 @@ def classify_batch(
             break
 
         logger.info("Classifying batch of %d items", len(batch))
-        for row in batch:
-            result = classify_feedback(
-                feedback_id=row["id"],
-                content=row["content"],
-                source=row["source"],
-                rating=row.get("rating"),
-            )
 
+        # Parallel classify via thread pool
+        results: list[tuple[dict, Optional[dict]]] = []
+        with ThreadPoolExecutor(max_workers=CONCURRENCY) as executor:
+            futures = {
+                executor.submit(
+                    classify_feedback, ai_client,
+                    row["id"], row["content"], row["source"], row.get("rating"),
+                ): row
+                for row in batch
+            }
+            for future in as_completed(futures):
+                results.append((futures[future], future.result()))
+
+        # Sequential DB inserts
+        for row, result in results:
             if result is None:
                 failed_count += 1
                 continue
-
-            def _to_pg_array(items: list[str]) -> str:
-                """Convert Python list to Postgres array literal."""
-                escaped = []
-                for item in items:
-                    s = item.replace("\\", "\\\\").replace('"', '\\"')
-                    escaped.append(f'"{s}"')
-                return "{" + ",".join(escaped) + "}"
 
             insert_data = {
                 "feedback_id": result["feedback_id"],
