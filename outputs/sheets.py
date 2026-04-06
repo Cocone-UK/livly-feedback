@@ -12,8 +12,8 @@ logger = logging.getLogger(__name__)
 
 SEVERITY_ORDER = {"critical": 0, "moderate": 1, "minor": 2}
 REGION_GROUPS = {
-    "EN": {"regions": ["en"], "summary_field": "summary"},
-    "ASIA": {"regions": ["jp", "tw", "hk"], "summary_field": "summary_jp"},
+    "EN": {"regions": ["en"], "summary_field": "summary", "include_region": False},
+    "ASIA": {"regions": ["jp", "tw", "hk"], "summary_field": "summary_jp", "include_region": True},
 }
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -64,7 +64,8 @@ def _clear_sheet(spreadsheet, ws):
     })
 
 
-def _build_stream_rows(classified_rows: list[dict], regions: list[str], summary_field: str = "summary") -> list[list]:
+def _build_stream_rows(classified_rows: list[dict], regions: list[str],
+                       summary_field: str = "summary", include_region: bool = True) -> list[list]:
     """Build a full per-region feed of all classified items, newest first."""
     filtered = [
         r for r in classified_rows
@@ -74,20 +75,32 @@ def _build_stream_rows(classified_rows: list[dict], regions: list[str], summary_
     rows = []
     for r in filtered:
         raw = r.get("feedback_raw", {})
-        rows.append([
-            raw.get("posted_at", ""),
-            raw.get("source", ""),
-            raw.get("region", ""),
-            r.get("sentiment", ""),
-            ", ".join(r.get("categories", [])),
-            r.get("severity", ""),
-            r.get("language", ""),
-            r.get(summary_field, ""),
-            "; ".join(r.get("key_quotes", [])),
-            raw.get("source_url", ""),
-        ])
+        if include_region:
+            rows.append([
+                raw.get("posted_at", ""),
+                raw.get("source", ""),
+                raw.get("region", ""),
+                r.get("sentiment", ""),
+                ", ".join(r.get("categories", [])),
+                r.get("severity", ""),
+                r.get("language", ""),
+                r.get(summary_field, ""),
+                "",  # Translation (filled with formula post-write)
+                "; ".join(r.get("key_quotes", [])),
+                raw.get("source_url", ""),
+            ])
+        else:
+            rows.append([
+                raw.get("posted_at", ""),
+                raw.get("source", ""),
+                r.get("sentiment", ""),
+                ", ".join(r.get("categories", [])),
+                r.get("severity", ""),
+                r.get(summary_field, ""),
+                "; ".join(r.get("key_quotes", [])),
+                raw.get("source_url", ""),
+            ])
 
-    # Newest first by posted_at (ISO strings sort lexicographically)
     rows.sort(key=lambda row: row[0] or "", reverse=True)
     return rows
 
@@ -263,22 +276,30 @@ def _apply_trends_colors(ws, rows: list[list], heatmap_offset: int, num_categori
         ws.batch_format(formats)
 
 
-HEADER_ROW = ["Date", "Source", "Region", "Sentiment", "Categories", "Severity", "Language", "Summary", "Key Quotes", "URL"]
+EN_STREAM_HEADER = ["Date", "Source", "Sentiment", "Categories", "Severity", "Summary", "Key Quotes", "URL"]
+ASIA_STREAM_HEADER = ["Date", "Source", "Region", "Sentiment", "Categories", "Severity", "Language", "Summary", "Translation", "Key Quotes", "URL"]
 
 SEVERITY_COLORS = {
     "critical": {"red": 1, "green": 0.8, "blue": 0.8},
     "moderate": {"red": 1, "green": 1, "blue": 0.8},
     "minor": {"red": 1, "green": 1, "blue": 1},
 }
+POSITIVE_COLOR = {"red": 0.85, "green": 1, "blue": 0.85}
 
 
-def _apply_severity_colors(ws, rows: list[list], start_row: int = 2):
+def _apply_stream_colors(ws, rows: list[list], sentiment_col: int, severity_col: int,
+                         end_col: str, start_row: int = 2):
+    """Apply severity colors to negative/mixed/neutral rows, green to positive rows."""
     formats = []
     for i, row in enumerate(rows):
-        severity = row[5] if len(row) > 5 else "minor"
-        color = SEVERITY_COLORS.get(severity, SEVERITY_COLORS["minor"])
+        sentiment = row[sentiment_col] if len(row) > sentiment_col else ""
+        severity = row[severity_col] if len(row) > severity_col else "minor"
         row_num = start_row + i
-        formats.append({"range": f"A{row_num}:J{row_num}", "format": {"backgroundColor": color}})
+        if sentiment == "positive":
+            color = POSITIVE_COLOR
+        else:
+            color = SEVERITY_COLORS.get(severity, SEVERITY_COLORS["minor"])
+        formats.append({"range": f"A{row_num}:{end_col}{row_num}", "format": {"backgroundColor": color}})
     if formats:
         ws.batch_format(formats)
 
@@ -411,16 +432,34 @@ def export_to_sheets(supabase_client, spreadsheet_id: str) -> None:
     # --- Stream tabs (full per-region feed, newest first) ---
     for group_name, config in REGION_GROUPS.items():
         tab_name = f"{group_name} Stream"
-        built_rows = _build_stream_rows(all_rows, config["regions"], config["summary_field"])
+        include_region = config["include_region"]
+        built_rows = _build_stream_rows(
+            all_rows, config["regions"], config["summary_field"], include_region,
+        )
+
+        if include_region:
+            header = ASIA_STREAM_HEADER
+            sentiment_col, severity_col, end_col = 3, 5, "K"
+        else:
+            header = EN_STREAM_HEADER
+            sentiment_col, severity_col, end_col = 2, 4, "H"
+
         try:
             ws = spreadsheet.worksheet(tab_name)
         except gspread.WorksheetNotFound:
             ws = spreadsheet.add_worksheet(title=tab_name, rows=max(len(built_rows) + 10, 1000), cols=12)
         _clear_sheet(spreadsheet, ws)
-        ws.append_row(HEADER_ROW)
+        ws.append_row(header)
         if built_rows:
             ws.append_rows(built_rows)
-            _apply_severity_colors(ws, built_rows)
+            _apply_stream_colors(ws, built_rows, sentiment_col, severity_col, end_col)
+
+            # ASIA Stream: fill Translation column with GOOGLETRANSLATE formula
+            if include_region:
+                formulas = [[f'=GOOGLETRANSLATE(H{row_num}, "ja", "en")']
+                            for row_num in range(2, len(built_rows) + 2)]
+                ws.update(f"I2:I{len(built_rows) + 1}", formulas,
+                          value_input_option="USER_ENTERED")
 
     # Reorder tabs: Trends → Weekly → Stream
     desired_order = ["EN Trends", "ASIA Trends", "EN Weekly", "ASIA Weekly",
