@@ -1,6 +1,16 @@
 from unittest.mock import patch, MagicMock
 from outputs.slack import build_digest_message, _build_fallback_digest, _build_stats_context, post_slack_digest
 
+LIVLY_CONFIG = {
+    "slug": "livly",
+    "display_name": "Livly Island",
+    "game_description": "a mobile pet game by Cocone",
+    "sheet_region_groups": {
+        "EN": {"regions": ["en"], "summary_field": "summary", "include_region": False, "flag": ":gb:"},
+        "ASIA": {"regions": ["jp", "tw", "hk"], "summary_field": "summary_jp", "include_region": True, "flag": ":jp:"},
+    },
+}
+
 
 def _make_classified_rows():
     base = {
@@ -13,7 +23,7 @@ def _make_classified_rows():
         "categories": ["bugs_performance"],
         "severity": "moderate",
         "summary": "Bug report",
-        "summary_jp": "バグ報告",
+        "summary_jp": "\u30d0\u30b0\u5831\u544a",
     }
     return [
         {**base},
@@ -30,23 +40,25 @@ def _make_classified_rows():
 
 def test_build_stats_context_includes_both_regions():
     rows = _make_classified_rows()
-    ctx = _build_stats_context(rows)
+    ctx = _build_stats_context(rows, LIVLY_CONFIG)
     assert "EN (3 items)" in ctx
-    assert "JP (1 items)" in ctx
+    assert "ASIA (1 items)" in ctx
 
 
 def test_build_stats_context_shows_critical_details():
     rows = _make_classified_rows()
-    ctx = _build_stats_context(rows)
+    ctx = _build_stats_context(rows, LIVLY_CONFIG)
     assert "Critical items: 1" in ctx
 
 
 def test_fallback_digest_contains_both_regions():
     rows = _make_classified_rows()
-    msg = _build_fallback_digest(rows, sheet_url="https://sheets.example.com", week_str="Mar 10, 2026")
+    msg = _build_fallback_digest(rows, sheet_url="https://sheets.example.com",
+                                 week_str="Mar 10, 2026", game_config=LIVLY_CONFIG)
     assert "EN Summary" in msg
-    assert "JP Summary" in msg
+    assert "ASIA Summary" in msg
     assert "critical" in msg.lower()
+    assert "Livly Island" in msg
 
 
 @patch("outputs.slack.anthropic.Anthropic")
@@ -54,11 +66,11 @@ def test_build_digest_message_calls_sonnet(mock_anthropic_cls):
     mock_client = MagicMock()
     mock_anthropic_cls.return_value = mock_client
     mock_response = MagicMock()
-    mock_response.content = [MagicMock(text="*Livly Island Feedback — Week of Mar 10, 2026*\nEN Summary")]
+    mock_response.content = [MagicMock(text="*Livly Island Feedback \u2014 Week of Mar 10, 2026*\nEN Summary")]
     mock_client.messages.create.return_value = mock_response
 
     rows = _make_classified_rows()
-    msg = build_digest_message(rows, sheet_url="https://sheets.example.com")
+    msg = build_digest_message(rows, sheet_url="https://sheets.example.com", game_config=LIVLY_CONFIG)
 
     mock_client.messages.create.assert_called_once()
     call_kwargs = mock_client.messages.create.call_args.kwargs
@@ -73,7 +85,7 @@ def test_build_digest_message_falls_back_on_error(mock_anthropic_cls):
     mock_client.messages.create.side_effect = Exception("API down")
 
     rows = _make_classified_rows()
-    msg = build_digest_message(rows, sheet_url="https://sheets.example.com")
+    msg = build_digest_message(rows, sheet_url="https://sheets.example.com", game_config=LIVLY_CONFIG)
 
     assert "Livly Island Feedback" in msg
 
