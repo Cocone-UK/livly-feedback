@@ -43,7 +43,7 @@
       "scrape_runs": "pokecolo_scrape_runs",
       "unclassified_rpc": "pokecolo_unclassified_feedback"
     },
-    "sheets_id": null,
+    "sheets_id": "1cjSmhAqUCMO_2p5kENaw8vAZMHyWhzygC3HaTxk56U4",
     "sheet_region_groups": {
       "JP": {"regions": ["jp"], "summary_field": "summary_jp", "include_region": false, "flag": ":jp:"},
       "EN": {"regions": ["en"], "summary_field": "summary", "include_region": false, "flag": ":gb:"},
