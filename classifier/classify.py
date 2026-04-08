@@ -9,66 +9,66 @@ from anthropic.types.messages.batch_create_params import Request
 
 logger = logging.getLogger(__name__)
 
-CATEGORIES = [
-    "ux",
-    "tutorial_onboarding",
-    "gacha_monetization",
-    "social",
-    "bugs_performance",
-    "content_request",
-    "account_login",
-    "art_aesthetics",
-    "general_praise",
-    "events",
-    "localization",
-]
+def _build_system_prompt(game_config: dict) -> str:
+    return (
+        f"You are classifying user feedback for {game_config['display_name']}, "
+        f"{game_config['game_description']}.\n"
+        "Analyze the feedback and classify it using the classify_feedback tool.\n\n"
+        "Severity guidelines:\n"
+        "- critical: User churned, threatening to quit, data loss, account locked out\n"
+        "- moderate: Frustrated but still playing, repeated complaint, functional issue\n"
+        "- minor: Suggestion, mild annoyance, cosmetic issue"
+    )
 
-CLASSIFICATION_TOOL = {
-    "name": "classify_feedback",
-    "description": "Classify a piece of user feedback for Livly Island.",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "sentiment": {
-                "type": "string",
-                "enum": ["positive", "negative", "neutral", "mixed"],
-                "description": "Overall sentiment of the feedback.",
+
+def _build_classification_tool(game_config: dict) -> dict:
+    categories = game_config["categories"]
+    return {
+        "name": "classify_feedback",
+        "description": f"Classify a piece of user feedback for {game_config['display_name']}.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sentiment": {
+                    "type": "string",
+                    "enum": ["positive", "negative", "neutral", "mixed"],
+                    "description": "Overall sentiment of the feedback.",
+                },
+                "categories": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": categories},
+                    "description": "One or more category tags.",
+                },
+                "severity": {
+                    "type": "string",
+                    "enum": ["critical", "moderate", "minor"],
+                    "description": "Critical = user churned/threatening to quit/data loss. Moderate = frustrated but playing. Minor = suggestion/cosmetic.",
+                },
+                "language": {
+                    "type": "string",
+                    "enum": ["en", "ja", "zh", "other"],
+                    "description": "Detected language of the feedback.",
+                },
+                "summary_en": {
+                    "type": "string",
+                    "description": "One-line summary in English.",
+                },
+                "summary_jp": {
+                    "type": "string",
+                    "description": "One-line summary in Japanese (for HQ).",
+                },
+                "key_quotes": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Notable phrases extracted from the feedback.",
+                },
             },
-            "categories": {
-                "type": "array",
-                "items": {"type": "string", "enum": CATEGORIES},
-                "description": "One or more category tags.",
-            },
-            "severity": {
-                "type": "string",
-                "enum": ["critical", "moderate", "minor"],
-                "description": "Critical = user churned/threatening to quit/data loss. Moderate = frustrated but playing. Minor = suggestion/cosmetic.",
-            },
-            "language": {
-                "type": "string",
-                "enum": ["en", "ja", "zh", "other"],
-                "description": "Detected language of the feedback.",
-            },
-            "summary_en": {
-                "type": "string",
-                "description": "One-line summary in English.",
-            },
-            "summary_jp": {
-                "type": "string",
-                "description": "One-line summary in Japanese (for HQ).",
-            },
-            "key_quotes": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Notable phrases extracted from the feedback.",
-            },
+            "required": [
+                "sentiment", "categories", "severity", "language",
+                "summary_en", "summary_jp", "key_quotes",
+            ],
         },
-        "required": [
-            "sentiment", "categories", "severity", "language",
-            "summary_en", "summary_jp", "key_quotes",
-        ],
-    },
-}
+    }
 
 
 def _to_pg_array(items: list[str]) -> str:
@@ -80,46 +80,39 @@ def _to_pg_array(items: list[str]) -> str:
     return "{" + ",".join(escaped) + "}"
 
 
-SYSTEM_PROMPT = """You are classifying user feedback for Livly Island, a mobile pet game by Cocone.
-Analyze the feedback and classify it using the classify_feedback tool.
-
-Severity guidelines:
-- critical: User churned, threatening to quit, data loss, account locked out
-- moderate: Frustrated but still playing, repeated complaint, functional issue
-- minor: Suggestion, mild annoyance, cosmetic issue"""
-
 POLL_INTERVAL = 30  # seconds between batch status checks
 
 
-def _fetch_unclassified(supabase_client, batch_size: int) -> list[dict]:
+def _fetch_unclassified(supabase_client, batch_size: int, rpc_name: str) -> list[dict]:
     """Fetch unclassified, non-superseded feedback via Postgres RPC."""
     from db.retry import with_retry
 
     resp = with_retry(
         lambda: supabase_client.rpc(
-            "unclassified_feedback", {"batch_limit": batch_size}
+            rpc_name, {"batch_limit": batch_size}
         ).execute(),
         "fetch unclassified feedback",
     )
     return resp.data or []
 
 
-def classify_batch(supabase_client) -> dict:
-    """Classify all unclassified feedback via the Anthropic Message Batches API.
-
-    Submits all items in a single batch, polls for completion, then upserts results.
-    50% cheaper and no timeout issues compared to sequential API calls.
-    Returns dict with counts: classified, failed.
-    """
+def classify_batch(supabase_client, game_config: dict) -> dict:
+    """Classify all unclassified feedback via the Anthropic Message Batches API."""
     from db.retry import with_retry
 
-    # Fetch all unclassified items in one shot
-    all_unclassified = _fetch_unclassified(supabase_client, 10000)
+    tables = game_config["tables"]
+    rpc_name = tables["unclassified_rpc"]
+    classified_table = tables["feedback_classified"]
+
+    all_unclassified = _fetch_unclassified(supabase_client, 10000, rpc_name)
     if not all_unclassified:
         logger.info("No unclassified items found")
         return {"classified": 0, "failed": 0}
 
     logger.info("Submitting %d items to Anthropic Batches API", len(all_unclassified))
+
+    system_prompt = _build_system_prompt(game_config)
+    classification_tool = _build_classification_tool(game_config)
 
     # Build batch requests
     requests = []
@@ -132,8 +125,8 @@ def classify_batch(supabase_client) -> dict:
             params=MessageCreateParamsNonStreaming(
                 model="claude-haiku-4-5-20251001",
                 max_tokens=1024,
-                system=SYSTEM_PROMPT,
-                tools=[CLASSIFICATION_TOOL],
+                system=system_prompt,
+                tools=[classification_tool],
                 tool_choice={"type": "tool", "name": "classify_feedback"},
                 messages=[{"role": "user", "content": user_message}],
             ),
@@ -190,7 +183,7 @@ def classify_batch(supabase_client) -> dict:
             "model_used": message.model,
         }
         with_retry(
-            lambda d=insert_data: supabase_client.table("feedback_classified").upsert(d).execute(),
+            lambda d=insert_data: supabase_client.table(classified_table).upsert(d).execute(),
             "upsert classification",
         )
         classified_count += 1

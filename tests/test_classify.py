@@ -1,19 +1,40 @@
 from unittest.mock import MagicMock, patch
-from classifier.classify import classify_feedback, CLASSIFICATION_TOOL, CATEGORIES
+from classifier.classify import _build_system_prompt, _build_classification_tool
 
-
-def test_categories_match_spec():
-    expected = [
+LIVLY_CONFIG = {
+    "slug": "livly",
+    "display_name": "Livly Island",
+    "game_description": "a mobile pet game by Cocone",
+    "categories": [
         "ux", "tutorial_onboarding", "gacha_monetization", "social",
         "bugs_performance", "content_request", "account_login",
         "art_aesthetics", "general_praise", "events", "localization",
-    ]
-    for cat in expected:
-        assert cat in CATEGORIES
+    ],
+    "tables": {
+        "feedback_raw": "feedback_raw",
+        "feedback_classified": "feedback_classified",
+        "scrape_runs": "scrape_runs",
+        "unclassified_rpc": "unclassified_feedback",
+    },
+}
+
+
+def test_system_prompt_includes_game_name():
+    prompt = _build_system_prompt(LIVLY_CONFIG)
+    assert "Livly Island" in prompt
+    assert "a mobile pet game by Cocone" in prompt
+
+
+def test_system_prompt_uses_config_name():
+    config = {**LIVLY_CONFIG, "display_name": "TestGame", "game_description": "a test game"}
+    prompt = _build_system_prompt(config)
+    assert "TestGame" in prompt
+    assert "Livly Island" not in prompt
 
 
 def test_classification_tool_has_required_fields():
-    props = CLASSIFICATION_TOOL["input_schema"]["properties"]
+    tool = _build_classification_tool(LIVLY_CONFIG)
+    props = tool["input_schema"]["properties"]
     assert "sentiment" in props
     assert "categories" in props
     assert "severity" in props
@@ -23,52 +44,12 @@ def test_classification_tool_has_required_fields():
     assert "key_quotes" in props
 
 
-@patch("classifier.classify.anthropic.Anthropic")
-def test_classify_feedback_returns_classification(mock_anthropic_cls):
-    mock_client = MagicMock()
-    mock_anthropic_cls.return_value = mock_client
-
-    mock_tool_block = MagicMock()
-    mock_tool_block.type = "tool_use"
-    mock_tool_block.input = {
-        "sentiment": "negative",
-        "categories": ["bugs_performance"],
-        "severity": "moderate",
-        "language": "en",
-        "summary_en": "User reports island layout broken after update",
-        "summary_jp": "ユーザーがアップデート後に島のレイアウトが壊れたと報告",
-        "key_quotes": ["broke my island layout"],
-    }
-
-    mock_response = MagicMock()
-    mock_response.content = [mock_tool_block]
-    mock_response.model = "claude-haiku-4-5-20251001"
-    mock_client.messages.create.return_value = mock_response
-
-    result = classify_feedback(
-        feedback_id="test-id",
-        content="The new update broke my island layout",
-        source="discord",
-        rating=None,
-    )
-
-    assert result["sentiment"] == "negative"
-    assert result["severity"] == "moderate"
-    assert result["model_used"] == "claude-haiku-4-5-20251001"
-    assert "bugs_performance" in result["categories"]
+def test_classification_tool_uses_config_categories():
+    tool = _build_classification_tool(LIVLY_CONFIG)
+    cat_enum = tool["input_schema"]["properties"]["categories"]["items"]["enum"]
+    assert cat_enum == LIVLY_CONFIG["categories"]
 
 
-@patch("classifier.classify.anthropic.Anthropic")
-def test_classify_feedback_handles_api_error(mock_anthropic_cls):
-    mock_client = MagicMock()
-    mock_anthropic_cls.return_value = mock_client
-    mock_client.messages.create.side_effect = Exception("Rate limited")
-
-    result = classify_feedback(
-        feedback_id="test-id",
-        content="test",
-        source="discord",
-        rating=None,
-    )
-
-    assert result is None
+def test_classification_tool_description_uses_game_name():
+    tool = _build_classification_tool(LIVLY_CONFIG)
+    assert "Livly Island" in tool["description"]
