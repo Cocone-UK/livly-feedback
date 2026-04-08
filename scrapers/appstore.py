@@ -5,8 +5,6 @@ from datetime import datetime, timezone
 from dateutil import parser as dateutil_parser
 from scrapers.base import FeedbackItem, ScraperResult
 
-APP_ID = "1553045339"
-COUNTRY_REGION_MAP = {"us": "en", "jp": "jp", "tw": "tw", "hk": "hk"}
 RSS_URL = "https://itunes.apple.com/{country}/rss/customerreviews/page={page}/id={app_id}/sortBy=mostRecent/json"
 
 
@@ -30,23 +28,24 @@ def _parse_rss_entry(entry: dict, region: str) -> FeedbackItem:
 
 
 def scrape_appstore(
-    countries: list[str] | None = None,
+    game_config: dict,
     max_pages: int = 10,
 ) -> list[ScraperResult]:
-    if countries is None:
-        countries = ["us", "jp", "tw", "hk"]
+    app_id = game_config["appstore_id"]
+    country_to_region = game_config["country_to_region"]
+    countries = list(country_to_region.keys())
 
     max_pages = min(max_pages, 10)
     results = []
 
     for country in countries:
-        region = COUNTRY_REGION_MAP.get(country, "en")
+        region = country_to_region.get(country, "en")
         items = []
         error = None
 
         try:
             for page in range(1, max_pages + 1):
-                url = RSS_URL.format(country=country, page=page, app_id=APP_ID)
+                url = RSS_URL.format(country=country, page=page, app_id=app_id)
                 resp = httpx.get(url, timeout=30)
                 resp.raise_for_status()
                 data = resp.json()

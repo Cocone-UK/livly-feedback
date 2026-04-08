@@ -3,6 +3,11 @@ from unittest.mock import patch, MagicMock
 from scrapers.appstore import scrape_appstore, _parse_rss_entry
 
 # Sample RSS entry from Apple's feed
+LIVLY_CONFIG = {
+    "appstore_id": "1553045339",
+    "country_to_region": {"us": "en"},
+}
+
 SAMPLE_RSS_ENTRY = {
     "author": {"name": {"label": "ReviewerName"}},
     "im:rating": {"label": "4"},
@@ -39,7 +44,7 @@ def test_scrape_appstore_fetches_pages(mock_get):
     mock_response.json.return_value = {"feed": {"entry": [SAMPLE_RSS_ENTRY]}}
     mock_get.return_value = mock_response
 
-    results = scrape_appstore(countries=["us"], max_pages=2)
+    results = scrape_appstore(game_config=LIVLY_CONFIG, max_pages=2)
 
     assert len(results) == 1
     assert results[0].source == "appstore_ios"
@@ -56,5 +61,5 @@ def test_scrape_appstore_handles_empty_page(mock_get):
     mock_response.json.return_value = {"feed": {}}
     mock_get.return_value = mock_response
 
-    results = scrape_appstore(countries=["us"], max_pages=10)
+    results = scrape_appstore(game_config=LIVLY_CONFIG, max_pages=10)
     assert len(results[0].items) == 0
