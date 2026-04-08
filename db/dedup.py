@@ -11,6 +11,7 @@ def deduplicate_and_insert(
     client: Client,
     items: list[FeedbackItem],
     run_id: str,
+    table_name: str = "feedback_raw",
 ) -> dict:
     """Insert feedback items with SHA-256 dedup.
 
@@ -38,7 +39,7 @@ def deduplicate_and_insert(
     for i in range(0, len(all_hashes), BATCH_SIZE):
         chunk = all_hashes[i:i + BATCH_SIZE]
         resp = with_retry(
-            lambda c=chunk: client.table("feedback_raw")
+            lambda c=chunk: client.table(table_name)
             .select("content_hash")
             .in_("content_hash", c)
             .execute(),
@@ -65,7 +66,7 @@ def deduplicate_and_insert(
         for i in range(0, len(external_ids), BATCH_SIZE):
             chunk = external_ids[i:i + BATCH_SIZE]
             resp = with_retry(
-                lambda s=source, c=chunk: client.table("feedback_raw")
+                lambda s=source, c=chunk: client.table(table_name)
                 .select("id, external_id")
                 .eq("source", s)
                 .in_("external_id", c)
@@ -98,7 +99,7 @@ def deduplicate_and_insert(
     for i in range(0, len(inserts), BATCH_SIZE):
         chunk = inserts[i:i + BATCH_SIZE]
         resp = with_retry(
-            lambda c=chunk: client.table("feedback_raw").insert(c).execute(),
+            lambda c=chunk: client.table(table_name).insert(c).execute(),
             "dedup batch insert",
         )
         inserted_rows.extend(resp.data or [])
@@ -116,7 +117,7 @@ def deduplicate_and_insert(
         if not new_id:
             continue
         with_retry(
-            lambda oid=old_id, nid=new_id: client.table("feedback_raw")
+            lambda oid=old_id, nid=new_id: client.table(table_name)
             .update({"superseded_by": nid})
             .eq("id", oid)
             .execute(),
