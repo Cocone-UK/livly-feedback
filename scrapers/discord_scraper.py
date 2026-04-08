@@ -89,5 +89,5 @@ async def _run_discord_scrape(
     return results
 
 
-def scrape_discord(since: Optional[datetime] = None) -> list[ScraperResult]:
+def scrape_discord(since: Optional[datetime] = None, game_config: dict | None = None) -> list[ScraperResult]:
     return asyncio.run(_run_discord_scrape(since))

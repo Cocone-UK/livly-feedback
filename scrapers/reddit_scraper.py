@@ -62,6 +62,7 @@ def scrape_reddit(
     since: Optional[datetime] = None,
     post_limit: int = 100,
     comments_per_post: int = 20,
+    game_config: dict | None = None,
 ) -> list[ScraperResult]:
     items = []
     error = None
