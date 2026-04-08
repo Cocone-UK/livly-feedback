@@ -11,10 +11,6 @@ from google.oauth2.service_account import Credentials
 logger = logging.getLogger(__name__)
 
 SEVERITY_ORDER = {"critical": 0, "moderate": 1, "minor": 2}
-REGION_GROUPS = {
-    "EN": {"regions": ["en"], "summary_field": "summary", "include_region": False},
-    "ASIA": {"regions": ["jp", "tw", "hk"], "summary_field": "summary_jp", "include_region": True},
-}
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
@@ -28,14 +24,14 @@ def _get_sheets_client() -> gspread.Client:
     return gspread.authorize(creds)
 
 
-def _fetch_all_classified(supabase_client, since: str) -> list[dict]:
+def _fetch_all_classified(supabase_client, since: str, table_name: str = "feedback_classified") -> list[dict]:
     """Fetch all classified feedback since a date, paginating past the 1000-row limit."""
     all_rows = []
     offset = 0
     page_size = 1000
     while True:
         resp = (
-            supabase_client.table("feedback_classified")
+            supabase_client.table(table_name)
             .select("*, feedback_raw(*)")
             .gte("classified_at", since)
             .order("id")
@@ -117,7 +113,8 @@ def _month_label(dt: datetime) -> str:
     return dt.strftime("%b'%y")
 
 
-def _build_trends_sections(classified_rows: list[dict], regions: list[str], since_year: int = 2025) -> tuple[list[list], int]:
+def _build_trends_sections(classified_rows: list[dict], regions: list[str],
+                           categories: list[str], since_year: int = 2025) -> tuple[list[list], int]:
     """Build Sentiment Timeline + Category Heat Map for a region. Returns (rows, timeline_row_count)."""
     cutoff = datetime(since_year, 1, 1, tzinfo=timezone.utc)
 
@@ -169,11 +166,7 @@ def _build_trends_sections(classified_rows: list[dict], regions: list[str], sinc
                       f"{pct_neg}%", top_issue, critical_count])
 
     # --- Section 2: Category Heat Map side-by-side (starting at column J) ---
-    category_columns = [
-        "bugs_performance", "gacha_monetization", "content_request", "ux",
-        "general_praise", "social", "account_login", "art_aesthetics",
-        "tutorial_onboarding", "events", "localization", "marketing_misleading",
-    ]
+    category_columns = categories
 
     HEATMAP_OFFSET = 9  # column J (0-indexed)
 
@@ -389,35 +382,46 @@ def _apply_summary_colors(ws, rows: list[list]):
         ws.batch_format(formats)
 
 
-def export_to_sheets(supabase_client, spreadsheet_id: str) -> None:
-    gc = _get_sheets_client()
-    spreadsheet = gc.open_by_key(spreadsheet_id)
+def export_to_sheets(supabase_client, game_config: dict) -> None:
+    sheets_id = game_config.get("sheets_id")
+    if not sheets_id:
+        logger.warning("No sheets_id configured for %s, skipping export", game_config["slug"])
+        return
 
-    all_rows = _fetch_all_classified(supabase_client, "2025-01-01T00:00:00+00:00")
+    gc = _get_sheets_client()
+    spreadsheet = gc.open_by_key(sheets_id)
+
+    tables = game_config["tables"]
+    region_groups = game_config["sheet_region_groups"]
+    categories = game_config["categories"]
+
+    all_rows = _fetch_all_classified(supabase_client, "2025-01-01T00:00:00+00:00", tables["feedback_classified"])
     logger.info("Fetched %d classified items for 2025+2026", len(all_rows))
 
-    # Remove legacy tabs (old naming + removed Raw Data)
-    for legacy in ["JP Trends", "JP Weekly", "JP Stream", "Raw Data"]:
+    # Remove legacy tabs
+    for legacy in game_config.get("legacy_tabs_to_remove", []):
         try:
             spreadsheet.del_worksheet(spreadsheet.worksheet(legacy))
         except gspread.WorksheetNotFound:
             pass
 
     # --- Trends tabs ---
-    for group_name, config in REGION_GROUPS.items():
+    for group_name, config in region_groups.items():
         tab_name = f"{group_name} Trends"
         try:
             spreadsheet.del_worksheet(spreadsheet.worksheet(tab_name))
         except gspread.WorksheetNotFound:
             pass
         ws = spreadsheet.add_worksheet(title=tab_name, rows=200, cols=20)
-        trends_data, hm_offset, num_cats = _build_trends_sections(all_rows, config["regions"], since_year=2025)
+        trends_data, hm_offset, num_cats = _build_trends_sections(
+            all_rows, config["regions"], categories, since_year=2025,
+        )
         if trends_data:
             ws.append_rows(trends_data)
             _apply_trends_colors(ws, trends_data, hm_offset, num_cats)
 
     # --- Weekly tabs ---
-    for group_name, config in REGION_GROUPS.items():
+    for group_name, config in region_groups.items():
         tab_name = f"{group_name} Weekly"
         summary_rows = _build_summary_blocks(all_rows, config["regions"], config["summary_field"])
         try:
@@ -429,8 +433,8 @@ def export_to_sheets(supabase_client, spreadsheet_id: str) -> None:
             ws.append_rows(summary_rows)
             _apply_summary_colors(ws, summary_rows)
 
-    # --- Stream tabs (full per-region feed, newest first) ---
-    for group_name, config in REGION_GROUPS.items():
+    # --- Stream tabs ---
+    for group_name, config in region_groups.items():
         tab_name = f"{group_name} Stream"
         include_region = config["include_region"]
         built_rows = _build_stream_rows(
@@ -454,16 +458,15 @@ def export_to_sheets(supabase_client, spreadsheet_id: str) -> None:
             ws.append_rows(built_rows)
             _apply_stream_colors(ws, built_rows, sentiment_col, severity_col, end_col)
 
-            # ASIA Stream: fill Translation column with GOOGLETRANSLATE formula
             if include_region:
                 formulas = [[f'=GOOGLETRANSLATE(H{row_num}, "ja", "en")']
                             for row_num in range(2, len(built_rows) + 2)]
                 ws.update(f"I2:I{len(built_rows) + 1}", formulas,
                           value_input_option="USER_ENTERED")
 
-    # Reorder tabs: Trends → Weekly → Stream
-    desired_order = ["EN Trends", "ASIA Trends", "EN Weekly", "ASIA Weekly",
-                     "EN Stream", "ASIA Stream"]
+    # Dynamic tab reordering
+    tab_types = ["Trends", "Weekly", "Stream"]
+    desired_order = [f"{g} {t}" for t in tab_types for g in region_groups.keys()]
     existing = {ws.title: ws for ws in spreadsheet.worksheets()}
     ordered = [existing[name] for name in desired_order if name in existing]
     for ws in spreadsheet.worksheets():
