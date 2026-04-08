@@ -5,12 +5,10 @@ from typing import Optional
 from google_play_scraper import reviews as gplay_reviews, Sort
 from scrapers.base import FeedbackItem, ScraperResult
 
-PACKAGE_ID = "jp.cocone.livly"
 PLAY_STORE_URL = "https://play.google.com/store/apps/details?id={pkg}&reviewId={review_id}"
-COUNTRY_REGION_MAP = {"us": "en", "jp": "jp", "tw": "tw", "hk": "hk"}
 
 
-def _parse_review(review: dict, region: str) -> FeedbackItem:
+def _parse_review(review: dict, region: str, package_id: str) -> FeedbackItem:
     posted_at = review["at"]
     if isinstance(posted_at, datetime) and posted_at.tzinfo is None:
         posted_at = posted_at.replace(tzinfo=timezone.utc)
@@ -23,23 +21,24 @@ def _parse_review(review: dict, region: str) -> FeedbackItem:
         content=review["content"] or "",
         rating=review.get("score"),
         channel=None,
-        source_url=PLAY_STORE_URL.format(pkg=PACKAGE_ID, review_id=review["reviewId"]),
+        source_url=PLAY_STORE_URL.format(pkg=package_id, review_id=review["reviewId"]),
         posted_at=posted_at,
     )
 
 
 def scrape_google_play(
-    regions: list[tuple[str, str]] | None = None,
+    game_config: dict,
     max_pages: int = 10,
     since: Optional[datetime] = None,
 ) -> list[ScraperResult]:
-    if regions is None:
-        regions = [("en", "us"), ("ja", "jp"), ("zh_TW", "tw"), ("zh_TW", "hk")]
+    package_id = game_config["google_play_id"]
+    regions = game_config["google_play_regions"]
+    country_to_region = game_config["country_to_region"]
 
     results = []
 
     for lang, country in regions:
-        region = COUNTRY_REGION_MAP.get(country, "en")
+        region = country_to_region.get(country, "en")
         items = []
         error = None
         token = None
@@ -47,7 +46,7 @@ def scrape_google_play(
         try:
             for _ in range(max_pages):
                 batch, token = gplay_reviews(
-                    PACKAGE_ID,
+                    package_id,
                     lang=lang,
                     country=country,
                     sort=Sort.NEWEST,
@@ -61,7 +60,7 @@ def scrape_google_play(
                 for review in batch:
                     if not review.get("content"):
                         continue
-                    item = _parse_review(review, region)
+                    item = _parse_review(review, region, package_id)
                     if since and item.posted_at < since:
                         token = None
                         break
